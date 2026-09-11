@@ -61,7 +61,6 @@ const $ = id => document.getElementById(id);
 let kind = "video";
 const CORS_KEY = "147524d9"; // Your corsproxy.io API key
 
-// Handle UI Selection
 document.querySelectorAll(".type").forEach(b => b.onclick = () => {
   document.querySelectorAll(".type").forEach(x => x.classList.remove("active"));
   b.classList.add("active"); 
@@ -87,7 +86,7 @@ function auth() {
 }
 
 // ---------------------------------------------------------
-// API WRAPPER WITH PROXY KEY
+// API WRAPPER WITH PROXY KEY & PROPER POST HANDLING
 // ---------------------------------------------------------
 async function api(path, opt = {}) {
   const url = `https://gate.apiscrape.net:16262/api${path}`;
@@ -101,9 +100,16 @@ async function api(path, opt = {}) {
   } catch (err) {
     console.warn("Direct API blocked, using proxy with key...");
     const proxyUrl = `https://corsproxy.io/?key=${CORS_KEY}&url=` + encodeURIComponent(url);
-    const r = await fetch(proxyUrl, { ...opt, headers });
+    
+    // Explicitly pass method and body to proxy fetch for POST requests
+    const r = await fetch(proxyUrl, {
+      method: opt.method || "GET",
+      headers: headers,
+      body: opt.body
+    });
+    
     const text = await r.text();
-    if(!r.ok) throw new Error("API Proxy Error: " + text.slice(0, 100));
+    if(!r.ok) throw new Error("API Proxy Error (" + r.status + "): " + text.slice(0, 100));
     try { return JSON.parse(text) } catch { return text }
   }
 }
@@ -119,7 +125,7 @@ async function getBlob(url) {
   };
 
   try {
-    return await attemptFetch(url); // Try direct fetch first
+    return await attemptFetch(url);
   } catch (e1) {
     $("status").textContent = "Bypassing network blocks via proxy...";
     try {
@@ -145,7 +151,6 @@ function idOf(x) { return x.format_id ?? x.formatId ?? x.id }
 function taskId(x) { return x.task_id || x.taskId || x.id || x.data?.task_id || x.data?.id }
 function safe(s) { return String(s || "download").replace(/[<>:"/\\\\|?*\\x00-\\x1F]/g, "_").trim().slice(0, 100) || "download" }
 
-// API Interactions
 async function wait(id) {
   for(let i=0; i<60; i++){
     const s = await api(`/status/${encodeURIComponent(id)}`);
@@ -167,9 +172,6 @@ async function finishedUrl(id) {
   return x.download_url || x.url || x.file_url || x.data?.download_url || x.data?.url;
 }
 
-// ---------------------------------------------------------
-// FFMPEG CONVERSION ENGINE
-// ---------------------------------------------------------
 let ffmpeg = null;
 async function loadFFmpeg() {
   if(ffmpeg) return ffmpeg;
@@ -230,9 +232,6 @@ function offer(blob, filename) {
   $("status").textContent = "Finished! Tap to save.";
 }
 
-// ---------------------------------------------------------
-// MAIN DOWNLOAD LOGIC
-// ---------------------------------------------------------
 $("download").onclick = async () => {
   $("save").hidden = true; 
   $("bar").style.width = "0%";
