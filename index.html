@@ -24,6 +24,7 @@ input{background:#0d1016;border:1px solid #343945;color:#fff;margin-bottom:13px;
 .progress{height:8px;background:#2a2f3a;border-radius:20px;overflow:hidden;margin-top:12px}
 .bar{height:100%;width:0;background:#4ade80;transition:width .3s ease-out}
 a.save{display:block;text-decoration:none;text-align:center;background:#5e8cff;color:#fff;border-radius:14px;padding:14px;font-weight:750;margin-top:14px}
+a.fallback{background:#f59e0b;} /* Orange for fallback */
 #settings{display:none;margin-top:12px;padding-top:12px;border-top:1px solid #2c303b}.hint{font-size:12px;color:#858d9b;line-height:1.45;margin-top:10px}
 </style>
 </head>
@@ -71,14 +72,13 @@ $("settingsButton").onclick = () => {
   $("settings").style.display = $("settings").style.display === "none" ? "block" : "none";
 };
 
-// Hardcoded Credentials as requested
 $("user").value = localStorage.getItem("apiUser") || "user_8f0c95e6";
 $("pass").value = localStorage.getItem("apiPass") || "bGkrl6aX";
 
 $("saveSettings").onclick = () => {
   localStorage.setItem("apiUser", $("user").value.trim());
   localStorage.setItem("apiPass", $("pass").value);
-  $("status").textContent = "API settings saved on this device.";
+  $("status").textContent = "API settings saved.";
 };
 
 function auth() {
@@ -87,7 +87,7 @@ function auth() {
 }
 
 // ---------------------------------------------------------
-// 1. ROBUST API WRAPPER (Handles API CORS errors securely)
+// API WRAPPER WITH STRICT DIAGNOSTICS
 // ---------------------------------------------------------
 async function api(path, opt = {}) {
   const url = `https://gate.apiscrape.net:16262/api${path}`;
@@ -96,42 +96,27 @@ async function api(path, opt = {}) {
   try {
     const r = await fetch(url, { ...opt, headers });
     const text = await r.text();
-    if(!r.ok) throw new Error(text.slice(0, 300));
+    if(!r.ok) throw new Error(text.slice(0, 100));
     return JSON.parse(text);
   } catch (err) {
-    console.warn("Direct API blocked, using proxy...");
-    const proxyUrl = "https://corsproxy.io/?" + encodeURIComponent(url);
-    const r = await fetch(proxyUrl, { ...opt, headers });
-    const text = await r.text();
-    if(!r.ok) throw new Error("API Proxy Error: " + text.slice(0, 300));
-    try { return JSON.parse(text) } catch { return text }
+    if (err.name === 'TypeError' || err.message.includes('NetworkError')) {
+      throw new Error(`[API CORS BLOCK]: The API server refused the browser connection. (${err.message})`);
+    }
+    throw err;
   }
 }
 
 // ---------------------------------------------------------
-// 2. ROBUST MEDIA FETCHER (Waterfall Proxy Strategy)
+// MEDIA FETCHER (With Fallback Trigger)
 // ---------------------------------------------------------
 async function getBlob(url) {
-  const attemptFetch = async (targetUrl) => {
-    const r = await fetch(targetUrl);
+  try {
+    const r = await fetch(url);
     if (!r.ok) throw new Error("HTTP " + r.status);
     return await r.blob();
-  };
-
-  try {
-    return await attemptFetch(url); // Try direct
-  } catch (e1) {
-    $("status").textContent = "Bypassing network blocks (Proxy 1)...";
-    try {
-      return await attemptFetch("https://corsproxy.io/?" + encodeURIComponent(url));
-    } catch (e2) {
-      $("status").textContent = "Bypassing network blocks (Proxy 2)...";
-      try {
-        return await attemptFetch("https://api.allorigins.win/raw?url=" + encodeURIComponent(url));
-      } catch (e3) {
-        throw new Error("All network proxies failed. The file might be too large or the server is blocking the request.");
-      }
-    }
+  } catch (err) {
+    console.error(err);
+    throw new Error("MEDIA_CORS_ERROR"); // Trigger the escape hatch
   }
 }
 
@@ -156,10 +141,10 @@ async function wait(id) {
     const st = String(s.status || s.state || s.data?.status || "").toLowerCase();
     if(["finished","completed","complete","success","done"].includes(st)) return s;
     if(["failed","error","cancelled","canceled"].includes(st)) throw new Error(s.error || s.message || "Task failed remotely");
-    $("status").textContent = `Waiting for remote server to process file...`;
+    $("status").textContent = `Server processing...`;
     await new Promise(r => setTimeout(r, 2000));
   }
-  throw new Error("Task timed out on the server.");
+  throw new Error("Task timed out.");
 }
 
 async function task(url, formatId) {
@@ -172,19 +157,17 @@ async function finishedUrl(id) {
 }
 
 // ---------------------------------------------------------
-// 3. FFMPEG CONVERSION ENGINE (Browser Side)
+// FFMPEG CONVERSION ENGINE
 // ---------------------------------------------------------
 let ffmpeg = null;
 async function loadFFmpeg() {
   if(ffmpeg) return ffmpeg;
-  $("status").textContent = "Booting up iOS media converter engine...";
+  $("status").textContent = "Loading converter engine...";
   const mod = await import("https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js");
   ffmpeg = new mod.FFmpeg();
   
   ffmpeg.on('progress', ({ progress }) => {
-    const percent = Math.round(progress * 100);
-    $("status").textContent = `Processing media on your device: ${percent}%`;
-    $("bar").style.width = `${60 + (percent * 0.35)}%`; // Scaled progress bar
+    $("bar").style.width = `${60 + (Math.round(progress * 100) * 0.35)}%`; 
   });
 
   await ffmpeg.load({
@@ -204,7 +187,7 @@ async function convertMusic(audioUrl) {
   await f.exec(["-i", "input", "-vn", "-codec:a", "libmp3lame", "-b:a", "192k", "output.mp3"]);
   
   const data = await f.readFile("output.mp3");
-  await f.deleteFile("input"); // iOS Memory cleanup
+  await f.deleteFile("input"); 
   return new Blob([data.buffer], { type: "audio/mpeg" });
 }
 
@@ -220,29 +203,42 @@ async function mux(videoUrl, audioUrl) {
   await f.exec(["-i", "video", "-i", "audio", "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "output.mp4"]);
   
   const data = await f.readFile("output.mp4");
-  
-  // Strict iOS Safari Memory Cleanup
   await f.deleteFile("video");
   await f.deleteFile("audio");
   
   return new Blob([data.buffer], { type: "video/mp4" });
 }
 
-function offer(blob, filename) {
+function offerBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   $("save").href = url;
   $("save").download = filename;
   $("save").textContent = "Save " + filename;
+  $("save").className = "save";
   $("save").hidden = false;
   $("bar").style.width = "100%";
-  $("status").textContent = "Finished! Tap the blue button to save to your files.";
+  $("status").textContent = "Finished! Tap to save.";
 }
 
+// THE ESCAPE HATCH: If the browser blocks FFmpeg, give them a direct link.
+function offerDirectLink(url, filename) {
+  $("save").href = url;
+  $("save").download = filename; // Note: Cross-origin downloads might just open in a new tab on iOS, which allows manual saving.
+  $("save").target = "_blank";
+  $("save").textContent = "Native Download: " + filename;
+  $("save").className = "save fallback";
+  $("save").hidden = false;
+  $("bar").style.width = "100%";
+  $("status").textContent = "Browser security blocked the converter. Tap the orange button to open/download the raw file directly.";
+}
+
+
 // ---------------------------------------------------------
-// 4. MAIN DOWNLOAD LOGIC
+// MAIN DOWNLOAD LOGIC
 // ---------------------------------------------------------
 $("download").onclick = async () => {
   $("save").hidden = true; 
+  $("save").target = "_self";
   $("bar").style.width = "0%";
   
   try {
@@ -258,35 +254,42 @@ $("download").onclick = async () => {
     
     if (kind === "music") {
       const a = bestAudio(fs);
-      if(!a) throw new Error("No audio format found for this link.");
+      if(!a) throw new Error("No audio format found.");
       
       $("status").textContent = "Requesting audio extraction…"; $("bar").style.width = "15%";
       const t = await task(url, idOf(a)), tid = taskId(t);
       await wait(tid); $("bar").style.width = "40%";
       const u = await finishedUrl(tid);
       
-      const blob = await convertMusic(u);
-      offer(blob, safe($("name").value || "music") + ".mp3");
+      try {
+        const blob = await convertMusic(u);
+        offerBlob(blob, safe($("name").value || "music") + ".mp3");
+      } catch (err) {
+        if (err.message === "MEDIA_CORS_ERROR") offerDirectLink(u, safe($("name").value || "music") + "_raw_audio");
+        else throw err;
+      }
 
     } else if (kind === "other") {
-      // Social Media (TikTok/Insta) - Skip FFmpeg completely for stability
       let fmt = bestCombined(fs) || bestVideo(fs);
-      if(!fmt) throw new Error("No formats found for this link.");
+      if(!fmt) throw new Error("No formats found.");
       
       $("status").textContent = "Requesting video file…"; $("bar").style.width = "20%";
       const t = await task(url, idOf(fmt)), tid = taskId(t);
       await wait(tid); $("bar").style.width = "50%";
-      
       const u = await finishedUrl(tid);
-      $("status").textContent = "Downloading final file to device...";
-      const blob = await getBlob(u); 
       
-      offer(blob, safe($("name").value || "download") + ".mp4");
+      try {
+        $("status").textContent = "Downloading final file to device...";
+        const blob = await getBlob(u); 
+        offerBlob(blob, safe($("name").value || "download") + ".mp4");
+      } catch (err) {
+         if (err.message === "MEDIA_CORS_ERROR") offerDirectLink(u, safe($("name").value || "video") + ".mp4");
+         else throw err;
+      }
 
     } else {
-      // Strict Video Mode (YouTube) - Needs merging
       const a = bestAudio(fs), v = bestVideo(fs);
-      if(!v || !a) throw new Error("Could not find separate high-quality video and audio tracks.");
+      if(!v || !a) throw new Error("Could not find separate video/audio tracks.");
       
       $("status").textContent = "Requesting high-quality tracks…"; $("bar").style.width = "10%";
       const [vt, at] = await Promise.all([task(url, idOf(v)), task(url, idOf(a))]);
@@ -295,8 +298,15 @@ $("download").onclick = async () => {
       await Promise.all([wait(vi), wait(ai)]); $("bar").style.width = "40%";
       const [vu, au] = await Promise.all([finishedUrl(vi), finishedUrl(ai)]);
       
-      const blob = await mux(vu, au);
-      offer(blob, safe($("name").value || "video") + ".mp4");
+      try {
+        const blob = await mux(vu, au);
+        offerBlob(blob, safe($("name").value || "video") + ".mp4");
+      } catch (err) {
+        if (err.message === "MEDIA_CORS_ERROR") {
+          // If merging fails due to CORS, offer just the video as a fallback
+          offerDirectLink(vu, safe($("name").value || "video") + "_no_audio.mp4");
+        } else throw err;
+      }
     }
   } catch (e) {
     console.error(e);
